@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-AP Top 25 WBB — Home Game Finder (with CSV export + append mode)
-==================================================================
+AP Top 25 WBB — Home Game Finder (with opponent rank + CSV export)
+===================================================================
 
 Fetches the current AP Top 25 from ESPN, then for each ranked team queries
 its full season schedule and lists all scheduled HOME games within a
-configurable date horizon. Optionally writes results to CSV (new file or
+configurable date horizon. Includes the opponent's AP rank when the
+opponent is also ranked. Optionally writes results to CSV (new file or
 append to an existing file for daily tracking).
 
 Usage:
@@ -47,6 +48,7 @@ CSV_FIELDNAMES = [
     "team",
     "game_date_utc",
     "opponent",
+    "opponent_rank",
     "venue",
 ]
 
@@ -89,11 +91,15 @@ def fetch_ap_top25() -> dict[int, dict]:
 # ---------------------------------------------------------------------------
 # Schedule / home games
 # ---------------------------------------------------------------------------
-def find_home_games(team_id: int, horizon_days: int) -> list[dict]:
+def find_home_games(team_id: int, horizon_days: int,
+                    ranked: dict[int, dict]) -> list[dict]:
     """Return all future home games for a team within `horizon_days`.
 
     horizon_days == 1 returns just the single next home game (even if it is
     further than 24h away); larger values filter by an actual date window.
+
+    `ranked` is the AP Top 25 mapping (team_id -> {rank, name}) and is used
+    to populate the opponent's rank when the visitor is also ranked.
     """
     url = TEAM_SCHEDULE_URL.format(team_id=team_id)
     try:
@@ -135,10 +141,20 @@ def find_home_games(team_id: int, horizon_days: int) -> list[dict]:
         if home_id is None or int(home_id) != team_id:
             continue
 
+        # Look up the away team's AP rank (blank if unranked)
+        away_team = away.get("team", {})
+        away_id = away_team.get("id")
+        opponent_rank = ""
+        if away_id is not None:
+            away_info = ranked.get(int(away_id))
+            if away_info is not None:
+                opponent_rank = away_info["rank"]
+
         games.append({
             "date": game_dt,
             "date_str": game_dt.strftime("%Y-%m-%d %H:%M UTC"),
-            "opponent": away.get("team", {}).get("displayName", "Unknown"),
+            "opponent": away_team.get("displayName", "Unknown"),
+            "opponent_rank": opponent_rank,
             "venue": comp.get("venue", {}).get("fullName", "TBD"),
         })
 
@@ -165,7 +181,6 @@ def write_csv(rows: list[tuple[dict, dict | None]],
 
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Decide whether we need to write a header.
     if append:
         file_exists = path.exists() and path.stat().st_size > 0
         mode = "a"
@@ -185,6 +200,7 @@ def write_csv(rows: list[tuple[dict, dict | None]],
                 "team": info["name"],
                 "game_date_utc": game["date_str"] if game else "",
                 "opponent": game["opponent"] if game else "",
+                "opponent_rank": game["opponent_rank"] if game else "",
                 "venue": game["venue"] if game else "",
             })
 
@@ -228,7 +244,7 @@ def main() -> None:
     all_rows: list[tuple[dict, dict | None]] = []
     for team_id, info in sorted(ranked.items(), key=lambda kv: kv[1]["rank"]):
         print(f"  Checking #{info['rank']:>2} {info['name']}...", end=" ", flush=True)
-        games = find_home_games(team_id, args.days)
+        games = find_home_games(team_id, args.days, ranked)
         if games:
             print(f"{len(games)} home game(s)")
             for g in games:
@@ -238,12 +254,12 @@ def main() -> None:
             all_rows.append((info, None))
 
     # ---- Console table ----
-    print("\n" + "=" * 100)
+    print("\n" + "=" * 108)
     print(f" AP TOP 25 WBB — HOME GAMES (next {args.days} day(s))")
-    print("=" * 100)
+    print("=" * 108)
     header = (
         f"{'Rank':<5} {'Team':<28} {'Date (UTC)':<20} "
-        f"{'Opponent':<26} {'Venue':<24}"
+        f"{'Opponent':<26} {'Opp Rk':<7} {'Venue':<24}"
     )
     print(header)
     print("-" * len(header))
@@ -258,13 +274,18 @@ def main() -> None:
             last_rank = info["rank"]
 
         if game:
+            opp_rank = f"#{game['opponent_rank']}" if game["opponent_rank"] else ""
             print(f"{rank_col:<5} {team_col:<28} {game['date_str']:<20} "
-                  f"{game['opponent']:<26} {game['venue']:<24}")
+                  f"{game['opponent']:<26} {opp_rank:<7} {game['venue']:<24}")
         else:
-            print(f"{rank_col:<5} {team_col:<28} {'—':<20} {'—':<26} {'—':<24}")
+            print(f"{rank_col:<5} {team_col:<28} {'—':<20} {'—':<26} {'':<7} {'—':<24}")
 
     total_games = sum(1 for _, g in all_rows if g)
+    ranked_matchups = sum(
+        1 for _, g in all_rows if g and g["opponent_rank"]
+    )
     print(f"\n {total_games} home game(s) across {len(ranked)} ranked teams.")
+    print(f" {ranked_matchups} of them are ranked-vs-ranked matchups.")
 
     # ---- CSV export ----
     if args.csv:
